@@ -176,37 +176,62 @@ class SMSReciver(private val eventSink: EventChannel.EventSink?) : BroadcastRece
                         if (!msgFrom.isNullOrBlank() && !msgText.isNullOrBlank()) {
                             Log.d(TAG, "Processing SMS: from=$msgFrom, message=$msgText")
 
-                            // Bildirim sesini çal (ana thread'de hemen feedback vermek için)
-                            // Bu kısım UI/ana thread'de çalışmak zorunda değil, ama hızlı olduğu için burada kalabilir
-                            // ya da background thread'e alınıp, Main'e geçilerek çalınabilir.
-                            // Şimdilik, onReceive'ın hemen başında çağrıldığı için burada kalabilir.
-                            withContext(Dispatchers.Main) {
-                                playNotificationSound(context)
-                                // Flutter'a mesaj içeriğini gönder (ana thread'de olmalı)
-                                eventSink?.success(messageToMap(msgFrom, msgText))
-                            }
-
                             try {
                                 val classificationCategories = bertClassifier(msgText, context)
 
                                 if (classificationCategories != null && classificationCategories.isNotEmpty()) {
                                     Log.d(TAG, "Classification result: $classificationCategories")
 
-                                    val spamCategory = classificationCategories.find { it["label"] == "BAHIS" }
-                                    val hamCategory = classificationCategories.find { it["label"] == "DEĞIL" }
+                                    // Parse classification results by finding specific labels
+                                    val hamCategory = classificationCategories.find { 
+                                        (it["label"] as? String)?.trim() == "DEĞIL" 
+                                    }
+                                    val spamCategory = classificationCategories.find { 
+                                        (it["label"] as? String)?.trim() == "BAHIS" 
+                                    }
+                                    
+                                    val hamScore = hamCategory?.let { category ->
+                                        val scoreValue = category["score"]
+                                        when (scoreValue) {
+                                            is Double -> scoreValue
+                                            is Float -> scoreValue.toDouble()
+                                            is Number -> scoreValue.toDouble()
+                                            else -> 0.0
+                                        }
+                                    } ?: 0.0
+                                    
+                                    val spamScore = spamCategory?.let { category ->
+                                        val scoreValue = category["score"]
+                                        when (scoreValue) {
+                                            is Double -> scoreValue
+                                            is Float -> scoreValue.toDouble()
+                                            is Number -> scoreValue.toDouble()
+                                            else -> 0.0
+                                        }
+                                    } ?: 0.0
 
-                                    val spamScore = spamCategory?.get("score") as? Double ?: 0.0
-                                    val hamScore = hamCategory?.get("score") as? Double ?: 0.0
+                                    Log.d(TAG, "Spam score: $spamScore, Ham score: $hamScore")
 
-                                    if (spamScore > hamScore && spamScore > 0.8) {
+                                    if (spamScore > hamScore && spamScore > 0.5) {
                                         Log.i(TAG, "Spam message detected with score: $spamScore")
                                         val db = DBHelper(context)
                                         db.insertData(msgText, msgFrom)
+                                        
+                                        // Flutter'a spam mesajını gönder (ses çalmadan)
+                                        withContext(Dispatchers.Main) {
+                                            eventSink?.success(messageToMap(msgFrom, msgText))
+                                        }
                                     } else {
                                         Log.d(TAG, "Normal message detected (Spam score: $spamScore, Ham score: $hamScore)")
                                         val contactName = getContactName(context, msgFrom)
                                         val displayName = if (contactName.isNotEmpty()) contactName else msgFrom
                                         val notificationKey = "$msgFrom:${msgText.hashCode()}"
+
+                                        // Normal mesajlar için bildirim sesi çal ve Flutter'a gönder
+                                        withContext(Dispatchers.Main) {
+                                            playNotificationSound(context)
+                                            eventSink?.success(messageToMap(msgFrom, msgText))
+                                        }
 
                                         if (shouldShowNotification(notificationKey)) {
                                             // Bildirimi gösterme UI ile ilgili olduğundan Main thread'e geçiş
@@ -226,6 +251,13 @@ class SMSReciver(private val eventSink: EventChannel.EventSink?) : BroadcastRece
                                     val contactName = getContactName(context, msgFrom)
                                     val displayName = if (contactName.isNotEmpty()) contactName else msgFrom
                                     val notificationKey = "$msgFrom:${msgText.hashCode()}"
+                                    
+                                    // BERT başarısız olduğunda normal mesaj olarak işle (ses çal)
+                                    withContext(Dispatchers.Main) {
+                                        playNotificationSound(context)
+                                        eventSink?.success(messageToMap(msgFrom, msgText))
+                                    }
+                                    
                                     if (shouldShowNotification(notificationKey)) {
                                         withContext(Dispatchers.Main) {
                                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -241,6 +273,13 @@ class SMSReciver(private val eventSink: EventChannel.EventSink?) : BroadcastRece
                                 val contactName = getContactName(context, msgFrom)
                                 val displayName = if (contactName.isNotEmpty()) contactName else msgFrom
                                 val notificationKey = "$msgFrom:${msgText.hashCode()}"
+                                
+                                // Hata durumunda normal mesaj olarak işle (ses çal)
+                                withContext(Dispatchers.Main) {
+                                    playNotificationSound(context)
+                                    eventSink?.success(messageToMap(msgFrom, msgText))
+                                }
+                                
                                 if (shouldShowNotification(notificationKey)) {
                                     withContext(Dispatchers.Main) {
                                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -518,6 +557,7 @@ class SMSReciver(private val eventSink: EventChannel.EventSink?) : BroadcastRece
             }
 
             Log.d(TAG, "BERT classification successful for message: '$message'. Result: $categories")
+            Log.d(TAG, "Classification categories: $categories")
             return categories
         } catch (e: Exception) {
             Log.e(TAG, "Error in BERT text classification for message: '$message'. Error: ${e.message}", e)
